@@ -2,8 +2,6 @@
 
 Export the useful part of Cursor Composer chats, then delete the fat `store.db` tape.
 
-**Private for review.** Intended to go public after a pass for secrets and tone.
-
 ## Motivation
 
 Heavy Cursor Agent use fills the disk with **agent session tape**, not with the short dialogue you actually read.
