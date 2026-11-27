@@ -28,15 +28,20 @@ Cursor uses an **append-only blob store** (conversation DAG) for agent fidelity,
 
 Many heavy Agent users hit the same wall. Cursor staff say so on the forum.
 
-Examples (forum.cursor.com):
+Examples ([forum.cursor.com](https://forum.cursor.com)):
 
-| Report | Size |
+| Report | Link |
 | --- | --- |
-| `state.vscdb` 3.1 GB → 97 GB | macOS |
-| Agent DB unbounded / ~96 GB climbing | self-fork copies |
-| Storage ~125 GB | Mac |
-| `state.vscdb` ~237 GB, only 46 GB free | GC needs ~2× free space |
-| Feature request: storage caps | auto-purge still backlog |
+| `state.vscdb` 3.1 GB → 97 GB (macOS) | https://forum.cursor.com/t/state-vscdb-grew-from-3-1-gb-97-gb-macos/166013 |
+| Agent chat DB grows without bound (~96 GB) | https://forum.cursor.com/t/agent-chat-db-state-vscdb-grows-without-bound-50-bubble-rows-per-visible-message-96-gb-and-climbing/170508 |
+| Cursor storage ~125 GB on Mac | https://forum.cursor.com/t/cursor-storage-has-grown-to-125gb-on-my-mac-how-can-i-safely-reduce-it-without-losing-history-context/172127 |
+| Unlimited DB bloat (staff: no auto retention) | https://forum.cursor.com/t/have-cursor-solved-the-problem-of-unlimitedly-bloat-db-and-slowdown-for-long-conversations/171972 |
+| Excessive storage / ~38 GB `state.vscdb` | https://forum.cursor.com/t/excessive-storage-in-macbook/173914 |
+| Feature request: storage caps | https://forum.cursor.com/t/add-storage-caps-for-cursors-chat-agent-database/176074 |
+| Safely reduce 237 GB `state.vscdb` | https://forum.cursor.com/t/how-to-safely-reduce-a-237-gb-state-vscdb-with-only-46-gb-free/177244 |
+| Remove local archived chats | https://forum.cursor.com/t/how-to-remove-local-archived-chats/158574 |
+
+Full list also in the [README](../README.md#forum-reports-same-class-of-problem).
 
 Staff answers (paraphrase):
 

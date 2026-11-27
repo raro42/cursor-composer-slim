@@ -25,5 +25,4 @@ Do not prune mid long-running job if you still need to **resume** that exact fat
 
 ## Not in scope
 
-- `state.vscdb` (Cursor UI GC)
-- Ollama models, Docker, mail, phone backups
+- `state.vscdb` — use Cursor UI: Export Chat → Delete Old Chats → GC Agent KV Blobs → full Quit
