@@ -42,7 +42,7 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import Iterator, List, Optional, Set, TextIO, Tuple
 
 HOME = Path.home()
 DATA_VOL = Path("/System/Volumes/Data")
@@ -59,11 +59,19 @@ STATE_VSCDB = (
     / "state.vscdb"
 )
 
+# Roles kept by default for training / readable history.
 KEEP_ROLES_DEFAULT = frozenset({"user", "assistant"})
+# Opt-in via --include-system (often Cursor boilerplate).
 KEEP_ROLES_WITH_SYSTEM = frozenset({"user", "assistant", "system"})
 
 
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+
 def human(n: float) -> str:
+    """Format a byte count as a short human string (B, Ki, Mi, Gi, Ti)."""
     units = ["B", "Ki", "Mi", "Gi", "Ti"]
     x = float(n)
     for u in units:
@@ -74,14 +82,20 @@ def human(n: float) -> str:
 
 
 def run(cmd: List[str]) -> subprocess.CompletedProcess:
+    """Run a shell command. Capture text stdout/stderr. Do not raise on failure."""
     return subprocess.run(cmd, text=True, capture_output=True)
 
 
 def hostname() -> str:
+    """Return the short host name used in archive paths."""
     return socket.gethostname().split(".")[0] or platform.node() or "host"
 
 
 def df_data() -> Tuple[str, str, str]:
+    """Return (used, avail, capacity) strings for the macOS Data volume.
+
+    Parses `df -h /System/Volumes/Data`. Returns ("?", "?", "?") on failure.
+    """
     out = run(["df", "-h", str(DATA_VOL)]).stdout.strip().splitlines()
     if len(out) < 2:
         return "?", "?", "?"
@@ -90,6 +104,11 @@ def df_data() -> Tuple[str, str, str]:
 
 
 def du_bytes(path: Path) -> int:
+    """Return allocated size of a path via `du -sk` (bytes).
+
+    Prefer this for directories and sparse files. Returns 0 if missing or
+    if `du` fails.
+    """
     if not path.exists():
         return 0
     cp = run(["du", "-sk", str(path)])
@@ -102,6 +121,10 @@ def du_bytes(path: Path) -> int:
 
 
 def path_size(path: Path) -> int:
+    """Return size of a file (`st_size`) or directory (`du_bytes`).
+
+    Returns 0 if the path does not exist.
+    """
     if not path.exists():
         return 0
     if path.is_file():
@@ -113,11 +136,13 @@ def path_size(path: Path) -> int:
 
 
 def cursor_app_running() -> bool:
+    """True if the Cursor.app GUI process is running on this Mac."""
     cp = run(["pgrep", "-f", "/Applications/Cursor.app/Contents/MacOS/Cursor"])
     return cp.returncode == 0 and bool(cp.stdout.strip())
 
 
 def warn_cursor() -> None:
+    """Print a one-line warning when Cursor.app is open during export/prune."""
     if cursor_app_running():
         print(
             "Note: Cursor.app is running. Export uses immutable reads. "
@@ -126,6 +151,7 @@ def warn_cursor() -> None:
 
 
 def archive_run_dir(root: Path) -> Path:
+    """Create and return `root/<hostname>/<UTC-stamp>/` for one export run."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     d = root.expanduser() / hostname() / stamp
     d.mkdir(parents=True, exist_ok=True)
@@ -133,6 +159,7 @@ def archive_run_dir(root: Path) -> Path:
 
 
 def write_archive_readme(out_dir: Path, manifest: dict) -> None:
+    """Write a short README.md into the archive folder for humans."""
     (out_dir / "README.md").write_text(
         f"""# Cursor Composer extract — {manifest.get('host')}
 
@@ -155,36 +182,17 @@ https://github.com/raro42/cursor-composer-slim
     )
 
 
-def cmd_status(_: argparse.Namespace) -> int:
-    used, avail, cap = df_data()
-    print(f"Host: {hostname()}")
-    print(f"Data volume: used={used}  free={avail}  capacity={cap}")
-    print(f"Cursor.app running: {cursor_app_running()}")
-    print()
-    rows = [
-        ("Composer chats", CHATS),
-        ("Cursor projects (transcripts)", PROJECTS),
-        ("state.vscdb (IDE KV)", STATE_VSCDB),
-    ]
-    print(f"{'Hotspot':<36} {'Size':>10}")
-    for label, p in rows:
-        sz = du_bytes(p) if p.is_dir() or p.name.endswith(".vscdb") else path_size(p)
-        if p.suffix == ".vscdb" or p.name == "state.vscdb":
-            sz = du_bytes(p) if p.exists() else 0
-            if p.is_file():
-                try:
-                    sz = p.stat().st_size
-                except OSError:
-                    sz = 0
-        print(f"{label:<36} {human(sz):>10}  {p}")
-    n_stores = sum(1 for _ in CHATS.glob("*/*/store.db")) if CHATS.is_dir() else 0
-    print(f"\nComposer store.db count: {n_stores}")
-    print("\nAgent transcripts stay on disk. This tool only slims store.db.")
-    print("state.vscdb needs Cursor UI: Export Chat → Delete Old Chats → GC Agent KV Blobs → Quit.")
-    return 0
-
-
 def remove_path(path: Path, apply: bool, quiet: bool = False) -> int:
+    """Delete a file or directory when apply is True.
+
+    Args:
+        path: File or directory to remove.
+        apply: If False, only print a dry-run line (unless quiet).
+        quiet: If True, do not print each path.
+
+    Returns:
+        Size in bytes of the path before delete (0 if missing).
+    """
     n = path_size(path)
     if n == 0 and not path.exists():
         return 0
@@ -202,26 +210,21 @@ def remove_path(path: Path, apply: bool, quiet: bool = False) -> int:
     return n
 
 
-def cmd_reclaim(args: argparse.Namespace) -> int:
-    nbytes = getattr(args, "bytes", 10**12)
-    print(f"Thin local snapshots (urge={nbytes}) …")
-    cp = run(["tmutil", "thinlocalsnapshots", "/", str(nbytes), "4"])
-    if cp.stdout.strip():
-        print(cp.stdout.strip())
-    if cp.stderr.strip():
-        print(cp.stderr.strip())
-    dates = run(["tmutil", "listlocalsnapshotdates", "/"]).stdout.splitlines()
-    for line in dates:
-        line = line.strip()
-        if line.startswith("20"):
-            print(f"Delete snapshot {line}")
-            run(["tmutil", "deletelocalsnapshots", line])
-    used, avail, cap = df_data()
-    print(f"Data volume: used={used} free={avail} capacity={cap}")
-    return 0
+# ---------------------------------------------------------------------------
+# store.db access and classification
+# ---------------------------------------------------------------------------
 
 
 def open_store_readonly(store: Path) -> Optional[sqlite3.Connection]:
+    """Open a Composer store.db for read-only export.
+
+    Tries SQLite URI `immutable=1` first so a stale `-wal` lock does not block.
+    Falls back to a temp copy of the main file only.
+
+    Returns:
+        An open connection, or None if the DB cannot be opened.
+        Temp-copy connections stash the temp path on `con._ccs_tmp` for cleanup.
+    """
     for uri in (
         f"file:{store}?mode=ro&immutable=1",
         f"file:{store}?mode=ro",
@@ -254,6 +257,7 @@ def open_store_readonly(store: Path) -> Optional[sqlite3.Connection]:
 
 
 def close_store(con: Optional[sqlite3.Connection]) -> None:
+    """Close a store connection and remove any temp copy from open_store_readonly."""
     if not con:
         return
     tmp = getattr(con, "_ccs_tmp", None)
@@ -269,6 +273,15 @@ def close_store(con: Optional[sqlite3.Connection]) -> None:
 
 
 def classify_blob(data: bytes) -> Tuple[str, Optional[dict]]:
+    """Classify one `blobs.data` row from store.db.
+
+    Returns:
+        (kind, parsed_dict_or_None). Kinds include:
+        `json_user`, `json_assistant`, `json_system`, `json_tool`,
+        `json_other`, `json_bad`, `textish`, `binary`, `empty`.
+
+        Only JSON role messages return a dict. textish/binary return None.
+    """
     if not data:
         return "empty", None
     if data[:1] in (b"{", b"["):
@@ -292,6 +305,11 @@ def classify_blob(data: bytes) -> Tuple[str, Optional[dict]]:
 
 
 def iter_store_dbs() -> Iterator[Path]:
+    """Yield every `~/.cursor/chats/<workspace>/<chat>/store.db` path.
+
+    Order is sorted by workspace, then chat folder. Yields nothing if CHATS
+    is missing.
+    """
     if not CHATS.is_dir():
         return
     for ws in sorted(CHATS.iterdir()):
@@ -301,47 +319,12 @@ def iter_store_dbs() -> Iterator[Path]:
             yield store
 
 
-def cmd_audit(args: argparse.Namespace) -> int:
-    print("Composer store.db audit")
-    print("Keep for training: json_user + json_assistant")
-    print("Bloat: json_tool, textish, binary\n")
-    counts: Counter = Counter()
-    nbytes: Counter = Counter()
-    files = 0
-    failed = 0
-    for store in iter_store_dbs():
-        if args.limit and files >= args.limit:
-            break
-        con = open_store_readonly(store)
-        if not con:
-            failed += 1
-            continue
-        files += 1
-        try:
-            for (data,) in con.execute("SELECT data FROM blobs"):
-                data = bytes(data)
-                kind, _ = classify_blob(data)
-                counts[kind] += 1
-                nbytes[kind] += len(data)
-        except sqlite3.Error:
-            failed += 1
-        finally:
-            close_store(con)
-    tot = sum(nbytes.values()) or 1
-    print(f"Opened {files} store.db  (open-fail {failed})")
-    print(f"{'kind':<18} {'count':>8} {'bytes':>12} {'share':>7}")
-    for kind, n in nbytes.most_common():
-        print(f"{kind:<18} {counts[kind]:8d} {human(n):>12} {100 * n / tot:6.1f}%")
-    useful = (
-        nbytes.get("json_user", 0)
-        + nbytes.get("json_assistant", 0)
-        + nbytes.get("json_system", 0)
-    )
-    print(f"\nKeep share (user+assistant+system): {100 * useful / tot:.1f}%  ({human(useful)})")
-    return 0
-
-
 def extract_text(content) -> str:
+    """Pull plain text out of a message `content` field.
+
+    Handles a bare string or a list of parts with `type: text` / `text` keys.
+    Returns "" for other shapes.
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -355,7 +338,19 @@ def extract_text(content) -> str:
     return ""
 
 
-def export_one_store(store: Path, out_fp, keep_roles) -> Tuple[int, int]:
+def export_one_store(
+    store: Path, out_fp: TextIO, keep_roles: Set[str]
+) -> Tuple[int, int]:
+    """Export kept roles from one store.db into an open JSONL file.
+
+    Args:
+        store: Path to store.db.
+        out_fp: Open text file for JSONL lines.
+        keep_roles: Roles to keep (usually user + assistant).
+
+    Returns:
+        (kept_count, skipped_count). Both 0 if the DB could not be opened.
+    """
     con = open_store_readonly(store)
     if not con:
         return 0, 0
@@ -402,6 +397,13 @@ def export_one_store(store: Path, out_fp, keep_roles) -> Tuple[int, int]:
 
 
 def index_agent_transcripts(out_dir: Path) -> dict:
+    """Write agent-transcripts.index.json (paths + sizes only; no file copy).
+
+    Scans `~/.cursor/projects/*/agent-transcripts/**/*.jsonl`.
+
+    Returns:
+        The index dict written to disk.
+    """
     items = []
     total = 0
     for p in sorted(PROJECTS.glob("*/agent-transcripts/**/*.jsonl")):
@@ -424,12 +426,31 @@ def index_agent_transcripts(out_dir: Path) -> dict:
     return idx
 
 
+# ---------------------------------------------------------------------------
+# Core workflows
+# ---------------------------------------------------------------------------
+
+
 def do_export(
     out_dir: Path,
     include_system: bool = False,
     limit: int = 0,
     verbose: bool = False,
 ) -> Tuple[int, dict]:
+    """Export all (or limited) store.db files into out_dir.
+
+    Writes composer-useful.jsonl, manifest, EXPORT_OK, archive README, and
+    updates hostname/LATEST. Also indexes agent-transcript paths.
+
+    Args:
+        out_dir: Archive run directory (created if needed).
+        include_system: Keep system prompts as well as user/assistant.
+        limit: Max stores to open (0 = all).
+        verbose: Print per-chat kept/skipped lines.
+
+    Returns:
+        (exit_code, manifest_dict). exit_code 1 if stores exist but none kept.
+    """
     warn_cursor()
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "composer-useful.jsonl"
@@ -467,11 +488,16 @@ def do_export(
             if verbose:
                 print(f"  {store.parent.name}: kept={kept} skipped={skipped}")
             elif done % 100 == 0 and done:
-                print(f"  … {done}/{total_planned}  kept={manifest['kept']}  {time.time()-t0:.0f}s")
+                print(
+                    f"  … {done}/{total_planned}  kept={manifest['kept']}  "
+                    f"{time.time()-t0:.0f}s"
+                )
     idx = index_agent_transcripts(out_dir)
     manifest["agent_transcript_files"] = idx["count"]
     manifest["agent_transcript_bytes"] = idx["bytes"]
-    (out_dir / "composer-useful.manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (out_dir / "composer-useful.manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n"
+    )
     (out_dir / "EXPORT_OK").write_text(manifest["created"] + "\n")
     latest = out_dir.parent / "LATEST"
     try:
@@ -482,8 +508,8 @@ def do_export(
         latest.write_text(out_dir.name + "\n")
     write_archive_readme(out_dir, manifest)
     print(
-        f"Done in {time.time()-t0:.0f}s: stores={manifest['stores']} kept={manifest['kept']} "
-        f"failed_open={manifest['failed_open']}"
+        f"Done in {time.time()-t0:.0f}s: stores={manifest['stores']} "
+        f"kept={manifest['kept']} failed_open={manifest['failed_open']}"
     )
     print(f"Archive: {out_dir}")
     if manifest["kept"] < 1 and total_planned > 0:
@@ -496,6 +522,14 @@ def do_export(
 
 
 def do_prune(export_dir: Path, apply: bool, force: bool = False) -> int:
+    """Delete store.db (+ wal/shm) after a successful export.
+
+    Requires EXPORT_OK in export_dir unless force is True. Keeps meta.json and
+    prompt_history.json. On apply, runs reclaim and writes PRUNE_OK.json.
+
+    Returns:
+        0 on success, 2 if EXPORT_OK is missing and force is False.
+    """
     marker = export_dir / "EXPORT_OK"
     if not marker.exists() and not force:
         print(f"Refuse prune: missing {marker}")
@@ -538,6 +572,15 @@ def do_prune(export_dir: Path, apply: bool, force: bool = False) -> int:
 
 
 def resolve_export_dir(path: str) -> Path:
+    """Resolve a prune/export path to a concrete run directory with EXPORT_OK.
+
+    Accepts:
+      - a run dir that already has EXPORT_OK
+      - a host dir with LATEST → stamp
+      - the archive root with <hostname>/LATEST
+
+    Returns the input path unchanged if nothing resolves.
+    """
     p = Path(path).expanduser()
     if (p / "EXPORT_OK").exists():
         return p
@@ -560,7 +603,118 @@ def resolve_export_dir(path: str) -> Path:
     return p
 
 
+# ---------------------------------------------------------------------------
+# CLI command handlers (argparse entry points)
+# ---------------------------------------------------------------------------
+
+
+def cmd_status(_: argparse.Namespace) -> int:
+    """CLI `status`: print disk free space and Cursor storage hotspots."""
+    used, avail, cap = df_data()
+    print(f"Host: {hostname()}")
+    print(f"Data volume: used={used}  free={avail}  capacity={cap}")
+    print(f"Cursor.app running: {cursor_app_running()}")
+    print()
+    rows = [
+        ("Composer chats", CHATS),
+        ("Cursor projects (transcripts)", PROJECTS),
+        ("state.vscdb (IDE KV)", STATE_VSCDB),
+    ]
+    print(f"{'Hotspot':<36} {'Size':>10}")
+    for label, p in rows:
+        sz = du_bytes(p) if p.is_dir() or p.name.endswith(".vscdb") else path_size(p)
+        if p.suffix == ".vscdb" or p.name == "state.vscdb":
+            sz = du_bytes(p) if p.exists() else 0
+            if p.is_file():
+                try:
+                    sz = p.stat().st_size
+                except OSError:
+                    sz = 0
+        print(f"{label:<36} {human(sz):>10}  {p}")
+    n_stores = sum(1 for _ in CHATS.glob("*/*/store.db")) if CHATS.is_dir() else 0
+    print(f"\nComposer store.db count: {n_stores}")
+    print("\nAgent transcripts stay on disk. This tool only slims store.db.")
+    print(
+        "state.vscdb needs Cursor UI: Export Chat → Delete Old Chats → "
+        "GC Agent KV Blobs → Quit."
+    )
+    return 0
+
+
+def cmd_reclaim(args: argparse.Namespace) -> int:
+    """CLI `reclaim`: thin/delete local Time Machine snapshots so APFS frees bytes.
+
+    Args:
+        args.bytes: Urgency hint passed to `tmutil thinlocalsnapshots`.
+    """
+    nbytes = getattr(args, "bytes", 10**12)
+    print(f"Thin local snapshots (urge={nbytes}) …")
+    cp = run(["tmutil", "thinlocalsnapshots", "/", str(nbytes), "4"])
+    if cp.stdout.strip():
+        print(cp.stdout.strip())
+    if cp.stderr.strip():
+        print(cp.stderr.strip())
+    dates = run(["tmutil", "listlocalsnapshotdates", "/"]).stdout.splitlines()
+    for line in dates:
+        line = line.strip()
+        if line.startswith("20"):
+            print(f"Delete snapshot {line}")
+            run(["tmutil", "deletelocalsnapshots", line])
+    used, avail, cap = df_data()
+    print(f"Data volume: used={used} free={avail} capacity={cap}")
+    return 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    """CLI `audit`: sample store.db blobs and print kind / size shares.
+
+    Args:
+        args.limit: Max number of successfully opened store.db files.
+    """
+    print("Composer store.db audit")
+    print("Keep for training: json_user + json_assistant")
+    print("Bloat: json_tool, textish, binary\n")
+    counts: Counter = Counter()
+    nbytes: Counter = Counter()
+    files = 0
+    failed = 0
+    for store in iter_store_dbs():
+        if args.limit and files >= args.limit:
+            break
+        con = open_store_readonly(store)
+        if not con:
+            failed += 1
+            continue
+        files += 1
+        try:
+            for (data,) in con.execute("SELECT data FROM blobs"):
+                data = bytes(data)
+                kind, _ = classify_blob(data)
+                counts[kind] += 1
+                nbytes[kind] += len(data)
+        except sqlite3.Error:
+            failed += 1
+        finally:
+            close_store(con)
+    tot = sum(nbytes.values()) or 1
+    print(f"Opened {files} store.db  (open-fail {failed})")
+    print(f"{'kind':<18} {'count':>8} {'bytes':>12} {'share':>7}")
+    for kind, n in nbytes.most_common():
+        print(f"{kind:<18} {counts[kind]:8d} {human(n):>12} {100 * n / tot:6.1f}%")
+    useful = (
+        nbytes.get("json_user", 0)
+        + nbytes.get("json_assistant", 0)
+        + nbytes.get("json_system", 0)
+    )
+    print(
+        f"\nKeep share (user+assistant+system): {100 * useful / tot:.1f}%  "
+        f"({human(useful)})"
+    )
+    return 0
+
+
 def cmd_export(args: argparse.Namespace) -> int:
+    """CLI `export`: create a new archive run and export useful JSONL."""
     out_dir = archive_run_dir(Path(args.out).expanduser())
     code, _ = do_export(
         out_dir,
@@ -572,10 +726,14 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def cmd_prune(args: argparse.Namespace) -> int:
-    return do_prune(resolve_export_dir(args.export_dir), apply=args.apply, force=args.force)
+    """CLI `prune`: delete store.db after EXPORT_OK (dry-run unless --apply)."""
+    return do_prune(
+        resolve_export_dir(args.export_dir), apply=args.apply, force=args.force
+    )
 
 
 def cmd_slim(args: argparse.Namespace) -> int:
+    """CLI `slim`: one shot — export, then prune (and reclaim if --apply)."""
     root = Path(args.out).expanduser()
     print(f"=== cursor-composer-slim on {hostname()} ===")
     used, avail, cap = df_data()
@@ -596,6 +754,7 @@ def cmd_slim(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the argparse tree and wire each subcommand to its handler."""
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -637,6 +796,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    """Parse argv and run the selected subcommand. Return its exit code."""
     args = build_parser().parse_args(argv)
     return int(args.func(args) or 0)
 

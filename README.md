@@ -95,6 +95,7 @@ Archive layout:
 
 - [docs/store-db.md](docs/store-db.md) — what the blobs are
 - [docs/fleet.md](docs/fleet.md) — run on more than one host
+- [cursor-composer-slim.py](cursor-composer-slim.py) — each function has a docstring (helpers, store.db I/O, workflows, CLI)
 
 ## License
 
