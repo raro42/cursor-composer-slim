@@ -1,5 +1,7 @@
 # cursor-composer-slim
 
+[![GitHub stars](https://img.shields.io/github/stars/raro42/cursor-composer-slim?style=social)](https://github.com/raro42/cursor-composer-slim/stargazers)
+
 Export the useful part of Cursor Composer chats, then delete the fat `store.db` tape.
 
 ## Motivation
