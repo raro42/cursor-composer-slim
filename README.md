@@ -8,7 +8,7 @@ Heavy Cursor Agent use fills the disk with **agent session tape**, not with the 
 
 Composer writes each chat to `~/.cursor/chats/<workspace>/<chat>/store.db`. Most of that file is tool output and execution plumbing (Shell, Read, Grep, call graphs). Only a thin slice is `user` / `assistant` text. Cursor needs the fat tape to **resume** a live agent. It does not need to keep every dump forever for history or training.
 
-On one Mac notebook, Composer chats alone were about **44 Gi**. After export + prune they were about **25 Mi**. Useful turns kept: about **54k** lines of JSONL. A parallel slim corpus already sits at `~/.cursor/projects/*/agent-transcripts/*.jsonl`.
+**Result on one Mac:** Cursor Composer chats were **44 GiB**. After export + prune: **25 MiB**. Useful turns kept (~54k user/assistant lines in JSONL). A parallel slim corpus already sits at `~/.cursor/projects/*/agent-transcripts/*.jsonl`.
 
 This is a **known product gap**, not a one-off misconfiguration. Cursor staff on the forum say chat/agent DBs can grow without automatic retention; cleanup was mostly manual for a long time. Official commands focus on `state.vscdb`. This tool targets the separate `store.db` trees under `~/.cursor/chats/`.
 
